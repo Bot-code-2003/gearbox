@@ -30,6 +30,9 @@ WARNING_THRESHOLD = 65 - MAE
 FAILURE_THRESHOLD = 70 - MAE
 FORECAST_HOURS = np.arange(0.5, 96.5, 0.5)
 
+ORIG_WARNING_THRESHOLD = 65
+ORIG_FAILURE_THRESHOLD = 70
+
 # --- Helper Functions ---
 def generate_sequences(df, feature_cols, target_col='wtrm_avg_TrmTmp_Gbx', lookback_steps=LOOKBACK_STEPS, forecast_steps=FORECAST_STEPS):
     """Generate sequences from dataframe - same function as training"""
@@ -138,7 +141,7 @@ st.sidebar.write(f"Forecast steps: {FORECAST_STEPS}")
 st.sidebar.markdown("### Batch Processing Controls")
 batch_size = st.sidebar.selectbox(
     "Batch Size", 
-    [10, 25, 50, 100, 200], 
+    [10, 25, 50, 100, 200, 500, 2000], 
     index=2, 
     help="Number of sequences to process at once"
 )
@@ -345,7 +348,15 @@ if st.button("Start Batch Processing", type="primary"):
     col4.metric("Batches Processed", num_batches)
     
     # Final Statistics
-    st.markdown("### Final Results Summary")
+    st.markdown("### ✅ Results on Predicted Max Temperatures *(Adjusted for MAE)*")
+    st.caption("""
+    These results are based on the **maximum predicted temperature** for each sequence (192 future steps).
+    To avoid false alarms caused by prediction noise, we **reduce the failure threshold by the model’s Mean Absolute Error (MAE)**. 
+
+    - This means a predicted temperature is considered a "failure" only if it exceeds `70°C - MAE`.
+    - This compensation helps avoid overestimating risk due to prediction uncertainty.
+    """)
+
     
     # Summary metrics
     col1, col2, col3, col4 = st.columns(4)
@@ -353,6 +364,106 @@ if st.button("Start Batch Processing", type="primary"):
     col2.metric("Success", total_success_count, delta=f"{(total_success_count/len(X_test)*100):.1f}%")
     col3.metric("Warnings", total_warning_count, delta=f"{(total_warning_count/len(X_test)*100):.1f}%")
     col4.metric("Failures", total_failure_count, delta=f"{(total_failure_count/len(X_test)*100):.1f}%")
+
+    # === Original Thresholds Summary ===
+    ORIG_WARNING_THRESHOLD = 65
+    ORIG_FAILURE_THRESHOLD = 70
+
+    # Count based on actual thresholds
+    orig_warning_flags = [temp > ORIG_WARNING_THRESHOLD for temp in all_max_temps]
+    orig_failure_flags = [temp > ORIG_FAILURE_THRESHOLD for temp in all_max_temps]
+    orig_success_flags = [not w for w in orig_warning_flags]
+
+    orig_warning_count = sum(orig_warning_flags)
+    orig_failure_count = sum(orig_failure_flags)
+    orig_success_count = len(all_max_temps) - orig_warning_count
+
+    st.markdown("### 📊 Results on Actual Max Temperatures *(No MAE Adjustment)*")
+    st.caption("""
+    These results evaluate predictions against the **original real-world failure threshold of 70°C and warning threshold of 65°C**, **without subtracting MAE**.
+
+    - This gives a **realistic risk assessment** using strict operational thresholds.
+    - Useful to see how well the model aligns with true field-level expectations.
+    """)
+
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Total Processed", len(all_max_temps))
+    col2.metric("Success", orig_success_count, delta=f"{(orig_success_count/len(all_max_temps)*100):.1f}%")
+    col3.metric("Warnings (65°C+)", orig_warning_count, delta=f"{(orig_warning_count/len(all_max_temps)*100):.1f}%")
+    col4.metric("Failures (70°C+)", orig_failure_count, delta=f"{(orig_failure_count/len(all_max_temps)*100):.1f}%")
+
+    # Risk level message based on actual thresholds
+    st.markdown("#### ⚠️ Risk Assessment (Actual Thresholds)")
+    orig_warning_pct = (orig_warning_count / len(all_max_temps)) * 100
+    orig_failure_pct = (orig_failure_count / len(all_max_temps)) * 100
+    orig_success_pct = (orig_success_count / len(all_max_temps)) * 100
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Success Rate", f"{orig_success_pct:.1f}%")
+        st.progress(min(orig_success_pct / 100, 1.0))
+    with col2:
+        st.metric("Warning Risk", f"{orig_warning_pct:.1f}%")
+        st.progress(min(orig_warning_pct / 100, 1.0))
+    with col3:
+        st.metric("Failure Risk", f"{orig_failure_pct:.1f}%")
+        st.progress(min(orig_failure_pct / 100, 1.0))
+
+    # Final message
+    if orig_failure_pct > 20:
+        st.error("REAL RISK: Over 20% of sequences exceed 70°C (Actual threshold)")
+    elif orig_warning_pct > 50:
+        st.warning("REAL CAUTION: Over 50% of sequences exceed 65°C (Actual threshold)")
+    else:
+        st.success("GOOD: Most sequences are within safe range (Actual thresholds)")
+
+    # --- Classification Summary (Sample-level Threshold Evaluation) ---
+    st.markdown("### 🧪 Threshold-based Classification Summary (Sample-level)")
+    st.caption("Each test sample is marked positive if **any** of its 192 forecasted steps exceeds the threshold. This is compared to ground truth.")
+
+    # Binary flags for each test sample
+    threshold = 70  # Real failure threshold (can be parameterized if needed)
+    safe_prediction_limit = 70 - MAE  # Adjusted limit used during prediction
+
+    actual_positive = np.any(y_test > threshold, axis=1)        # Ground truth
+    predicted_positive = np.any(np.array(all_predictions) > safe_prediction_limit, axis=1)  # Model prediction
+
+    # Metrics
+    TP = np.sum(actual_positive & predicted_positive)
+    FP = np.sum(~actual_positive & predicted_positive)
+    FN = np.sum(actual_positive & ~predicted_positive)
+    TN = np.sum(~actual_positive & ~predicted_positive)
+
+    # Derived metrics
+    precision = TP / (TP + FP) if (TP + FP) > 0 else 0
+    recall = TP / (TP + FN) if (TP + FN) > 0 else 0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+    accuracy = (TP + TN) / (TP + TN + FP + FN) * 100
+
+    # Display classification counts
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("True Positives", TP)
+    col2.metric("False Positives", FP)
+    col3.metric("False Negatives", FN)
+    col4.metric("True Negatives", TN)
+
+    # Display derived metrics with short descriptions
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Precision", f"{precision:.2f}")
+        st.caption("🔍 Of all predicted failures, how many were correct?")
+    with col2:
+        st.metric("Recall", f"{recall:.2f}")
+        st.caption("🎯 Of all actual failures, how many were caught?")
+    with col3:
+        st.metric("F1 Score", f"{f1:.2f}")
+        st.caption("⚖️ Balance between precision and recall")
+    with col4:
+        st.metric("Accuracy", f"{accuracy:.2f}%")
+        st.caption("✅ Overall correctness of predictions")
+
+
     
     # Risk Assessment
     st.markdown("### Risk Assessment")
