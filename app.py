@@ -194,7 +194,7 @@ if st.button("Start Batch Processing", type="primary"):
         plot_placeholder = st.empty()
     
     # Set up plot limits
-    y_min = min(WARNING_THRESHOLD - 10, 45)
+    y_min = min(WARNING_THRESHOLD - 10, 0)
     y_max = max(FAILURE_THRESHOLD + 10, 80)
     
     start_time = time.time()
